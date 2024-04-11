@@ -16,11 +16,17 @@
 typedef struct _FltGstData
 {
     GstElement *pipeline;
-    GstElement *audiotestsrc;
-    GstElement *audioconvert;
-    GstElement *autoaudiosink;
+    //GstElement *audiotestsrc;
+    //GstElement *audioconvert;
+    //GstElement *autoaudiosink;
 
-    GstElement *videotestsrc;
+    //GstElement *videotestsrc;
+
+    GstElement *filesrc;
+    GstElement *qtdemux;
+    GstElement *h264parse;
+    GstElement *avdec_h264;
+
     GstElement *autovideosink;
     GMainLoop *mainloop;
 
@@ -41,6 +47,111 @@ FFI_PLUGIN_EXPORT void init(void)
     // init
     gst_init(NULL, NULL);
     data = g_new0(FltGstData,1);
+}
+
+static void on_pad_added(GstElement *element, GstPad *pad, gpointer data) {
+    GstElement *decoder = GST_ELEMENT(data);
+
+    // Check if the pad is a source pad
+    GstCaps *caps = gst_pad_query_caps(pad, NULL);
+    GstStructure *str = gst_caps_get_structure(caps, 0);
+    const gchar *name = gst_structure_get_name(str);
+
+    if (g_str_has_prefix(name, "video/x-h264")) {
+        GstPad *sink_pad = gst_element_get_static_pad(decoder, "sink");
+        //GstPad *sink_pad = gst_element_get_static_pad(data->h264parse, "sink");
+
+        if (!gst_pad_is_linked(sink_pad)) {
+            // Link the pads
+            GstPadLinkReturn ret = gst_pad_link(pad, sink_pad);
+            if (ret != GST_PAD_LINK_OK) {
+                g_printerr("Failed to link pads. Error: %s\n", gst_pad_link_get_name(ret));
+            }
+        }
+        gst_object_unref(sink_pad);
+    }
+
+    gst_caps_unref(caps);
+}
+
+FFI_PLUGIN_EXPORT void setup_pipeline(void)
+{
+    // Setup pipeline
+    GstElement *filesrc, *qtdemux, *h264parse, *avdec_h264, *autovideosink;
+
+    data->filesrc = gst_element_factory_make("filesrc", NULL);
+    data->qtdemux = gst_element_factory_make("qtdemux", NULL);
+    data->h264parse = gst_element_factory_make("h264parse", NULL);
+    data->avdec_h264 = gst_element_factory_make("avdec_h264", NULL);
+    data->autovideosink = gst_element_factory_make("autovideosink", NULL);
+
+    // Check if elements are created successfully
+    if (!data->filesrc || !data->qtdemux || !data->h264parse || !data->avdec_h264 || !data->autovideosink) {
+        g_printerr("Failed to create elements. Exiting.\n");
+        // Clean up
+        if (data->filesrc) gst_object_unref(data->filesrc);
+        if (data->qtdemux) gst_object_unref(data->qtdemux);
+        if (data->h264parse) gst_object_unref(data->h264parse);
+        if (data->avdec_h264) gst_object_unref(data->avdec_h264);
+        if (data->autovideosink) gst_object_unref(data->autovideosink);
+        return;
+    }
+
+    // Set the location for filesrc
+    g_object_set(G_OBJECT(data->filesrc), "location", "/sdcard/test.mp4", NULL);
+
+    // Create the pipeline
+    data->pipeline = gst_pipeline_new("test-pipeline");
+    if (!data->pipeline) {
+        g_printerr("Pipeline could not be created.\n");
+        return;
+    }
+
+    // Add elements to the pipeline
+    gst_bin_add_many(GST_BIN(data->pipeline), data->filesrc, data->qtdemux, data->h264parse, data->avdec_h264, data->autovideosink, NULL);
+
+    // Link the elements (separate linking for qtdemux)
+    if (!gst_element_link(data->filesrc, data->qtdemux)) {
+        g_printerr("Failed to link filesrc and qtdemux. Exiting.\n");
+        gst_object_unref(data->pipeline);
+        return;
+    }
+
+    if (!gst_element_link_many(data->h264parse, data->avdec_h264, data->autovideosink, NULL)) {
+        g_printerr("Failed to link h264parse, avdec_h264, and autovideosink. Exiting.\n");
+        gst_object_unref(data->pipeline);
+        return;
+    }
+    // Instead of directly linking the elements, connect the "pad-added" signal of qtdemux
+    //g_signal_connect(data->qtdemux, "pad-added", G_CALLBACK(on_pad_added), data);
+    g_signal_connect(data->qtdemux, "pad-added", G_CALLBACK(on_pad_added), data->h264parse);
+
+    // Set pipeline state
+    gst_element_set_state(data->pipeline, GST_STATE_READY);
+
+    // Get overlay interface
+    data->overlay = gst_bin_get_by_interface(GST_BIN(data->pipeline), GST_TYPE_VIDEO_OVERLAY);
+}
+
+#if 0
+FFI_PLUGIN_EXPORT void setup_pipeline(void)
+{
+    // Setup pipeline
+    gchar *pipeline_description = g_strdup("filesrc location=/sdcard/test.mp4 ! qtdemux ! h264parse ! avdec_h264 ! autovideosink");
+
+    data->pipeline = gst_parse_launch(pipeline_description, NULL);
+    g_free(pipeline_description);
+
+    if (!data->pipeline) {
+        g_printerr("Pipeline could not be created.\n");
+        return;
+    }
+
+    // Set pipeline state
+    gst_element_set_state(data->pipeline, GST_STATE_READY);
+
+    // Get overlay interface
+    data->overlay = gst_bin_get_by_interface(GST_BIN(data->pipeline), GST_TYPE_VIDEO_OVERLAY);
 }
 
 FFI_PLUGIN_EXPORT void setup_pipeline(void)
@@ -73,7 +184,7 @@ FFI_PLUGIN_EXPORT void setup_pipeline(void)
     data->overlay = gst_bin_get_by_interface(GST_BIN(data->pipeline),GST_TYPE_VIDEO_OVERLAY);
 
 }
-
+#endif
 
 FFI_PLUGIN_EXPORT void start_pipeline(void)
 {
